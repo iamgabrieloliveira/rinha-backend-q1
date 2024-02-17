@@ -1,0 +1,16 @@
+[package]
+name = "q1"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix-web = "4"
+chrono = { version = "0.4.33", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+deadpool-postgres = "0.12.1"
+postgres = {  version = "0.19.1", features = ["with-chrono-0_4", "with-serde_json-1"] }
+tokio = { version = "1.12.0", features = ["rt", "rt-multi-thread", "macros"] }
+serde_json = "1"
+futures = "0.3"

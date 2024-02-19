@@ -41,6 +41,10 @@ async fn customer_transaction(
         return HttpResponse::UnprocessableEntity().finish();
     }
 
+    if body.descricao.is_none() {
+        return HttpResponse::UnprocessableEntity().finish();
+    }
+
     if ! is_between(body.descricao.len(), 1, 10) {
         return HttpResponse::UnprocessableEntity().finish();
     }

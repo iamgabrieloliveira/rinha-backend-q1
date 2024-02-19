@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct ClientTransactionRequest {
     pub valor: i32,
     pub tipo: String,
-    pub descricao: String,
+    pub descricao: Option<String>,
 }
 
 #[derive(Deserialize)]

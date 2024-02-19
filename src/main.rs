@@ -23,16 +23,6 @@ impl AppData {
     }
 }
 
-fn json_error_handler(err: error::JsonPayloadError, _req: &HttpRequest) -> error::Error {
-    match err {
-        error::JsonPayloadError::Deserialize(_) => {
-            error::InternalError::from_response(err, HttpResponse::UnprocessableEntity().finish())
-                .into()
-        }
-        _ => err.into(),
-    }
-}
-
 fn is_between(value: usize, n1: usize, n2: usize) -> bool { value >= n1 && value <= n2 }
 
 #[post("/clientes/{client_id}/transacoes")]

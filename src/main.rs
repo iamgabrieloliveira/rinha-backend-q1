@@ -1,33 +1,46 @@
-mod db;
-mod structs;
-
-use std::thread;
-use actix_web::{HttpServer, App, web, HttpResponse, Responder, post, get, error, HttpRequest};
-use actix_web::web::JsonConfig;
-use chrono::Utc;
+use actix_web::{HttpServer, App, web, HttpResponse, Responder};
 use serde_json::{json};
-use deadpool_postgres::{Pool};
-use crate::structs::{ClientTransactionRequest, CustomerStatementResponse, Balance, TransactionStatement, NewTransactionResponse};
+use std::env;
+use deadpool_postgres::{ManagerConfig, RecyclingMethod, Runtime};
+use deadpool_postgres::Pool;
+use postgres::NoTls;
+use chrono::{DateTime, NaiveDateTime, offset::Utc};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone)]
-struct AppData {
-    db: Pool,
+#[derive(Deserialize)]
+pub struct ClientTransactionRequest {
+    pub valor: i32,
+    pub tipo: String,
+    pub descricao: Option<String>,
 }
 
-impl AppData {
-    async fn get_database_connection(&self) -> deadpool_postgres::Object {
-         self.db
-            .get()
-            .await
-            .unwrap()
-    }
+fn env_or(key: &str, default: &str) -> Option<String> {
+    Some(
+        env::var(key).unwrap_or(default.to_string())
+    )
 }
 
-fn is_between(value: usize, n1: usize, n2: usize) -> bool { value >= n1 && value <= n2 }
+fn get_db_config() -> deadpool_postgres::Config {
+    let mut config = deadpool_postgres::Config::new();
 
-#[post("/clientes/{client_id}/transacoes")]
+    config.user = env_or("DB_USER", "admin");
+    config.password = env_or("DB_PASSWORD", "1234");
+    config.dbname = env_or("DB_NAME", "rinha");
+    config.host = env_or("DB_HOST", "localhost");
+    config.port = Some(5432);
+
+    config.manager =
+        Some(ManagerConfig { recycling_method: RecyclingMethod::Fast });
+
+    config
+}
+
+fn create_pool() -> Result<Pool, String> {
+    Ok(get_db_config().create_pool(Some(Runtime::Tokio1), NoTls).map_err(|err| err.to_string())?)
+}
+
 async fn customer_transaction(
-    app: web::Data<AppData>,
+    pool: web::Data<Pool>,
     path: web::Path<i32>,
     body: web::Json<ClientTransactionRequest>,
 ) -> impl Responder {
@@ -41,11 +54,12 @@ async fn customer_transaction(
         return HttpResponse::UnprocessableEntity().finish();
     }
 
-    if body.descricao.is_none() {
-        return HttpResponse::UnprocessableEntity().finish();
-    }
+    let description = match &body.descricao {
+        Some(desc) => desc,
+        None => return HttpResponse::UnprocessableEntity().finish(),
+    };
 
-    if ! is_between(body.descricao.len(), 1, 10) {
+    if description.len() > 10 || description.len() < 1 {
         return HttpResponse::UnprocessableEntity().finish();
     }
 
@@ -53,12 +67,13 @@ async fn customer_transaction(
 
     let value = if is_debit { -body.valor } else { body.valor };
 
-    let connection = app.get_database_connection().await;
+    let conn = pool.get().await.unwrap();
 
-    let result = connection
+    let result = conn
         .query("\
         UPDATE clientes SET saldo = saldo + $1 \
-        WHERE id = $2 AND (saldo + $1) > (- limite) RETURNING limite, saldo", &[&value, &customer_id])
+        WHERE id = $2 AND (saldo + $1) > (- limite) \
+        RETURNING limite, saldo", &[&value, &customer_id])
         .await
         .unwrap();
 
@@ -68,7 +83,7 @@ async fn customer_transaction(
 
     let updated_customer = result.first().unwrap();
 
-    connection
+   conn
         .query("INSERT INTO transacoes(valor, id_cliente, tipo, descricao) values($1, $2, $3, $4)", &[
             &body.valor,
             &customer_id,
@@ -78,17 +93,17 @@ async fn customer_transaction(
         .await
         .unwrap();
 
-    HttpResponse::Ok().json(
-        NewTransactionResponse {
-            limite: updated_customer.get("limite"),
-            saldo: updated_customer.get("saldo"),
-        }
+    HttpResponse::Ok()
+        .body(
+        json!({
+            "limite": updated_customer.get::<_, i32>("limite"),
+            "saldo": updated_customer.get::<_, i32>("saldo"),
+        }).to_string()
     )
 }
 
-#[get("/clientes/{client_id}/extrato")]
 async fn customer_statement(
-    app: web::Data<AppData>,
+    pool: web::Data<Pool>,
     path: web::Path<i32>,
 ) -> impl Responder {
     let customer_id = path.into_inner();
@@ -97,57 +112,27 @@ async fn customer_statement(
         return HttpResponse::NotFound().finish();
     }
 
-    let conn = app.get_database_connection().await;
+    let conn = pool.get().await.unwrap();
 
-    let customer = conn.query_one(
-        "SELECT json_build_object('total', saldo, 'limite', limite, 'data_extrato', now()) \
-        FROM clientes \
-        where id = $1",
-        &[&customer_id]
-    )
-        .await
-        .unwrap();
-
-    let statements = conn.query(
-        "SELECT json_build_object('valor', valor, 'tipo', tipo, 'descricao', descricao, 'realizada_em', realizada_em) \
-        FROM transacoes \
-        WHERE id_cliente = $1 \
-        ORDER BY realizada_em \
-        DESC LIMIT 10",
-        &[&customer_id],
-    )
-        .await
-        .unwrap();
-
-    let statements_json: Vec<_> = statements
-        .into_iter()
-        .map(|row| row.get::<_, serde_json::Value>(0))
-        .collect();
-
-    let response = json!({
-        "saldo": customer.get::<_, serde_json::Value>(0),
-        "ultimas_transacoes": statements_json,
-    });
+    let extrato = conn.query_one("SELECT get_extrato($1)", &[&customer_id]).await.unwrap();
 
     HttpResponse::Ok()
-        .content_type("application/json")
-        .body(response.to_string())
+        .body(
+            extrato.get::<_, serde_json::Value>(0).to_string()
+        )
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    let port = env_or("PORT", "9999").unwrap();
+
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(
-                AppData {
-                    db: db::create_pool().unwrap(),
-                }
-            ))
-            .app_data(JsonConfig::default().error_handler(json_error_handler))
-            .service(customer_transaction)
-            .service(customer_statement)
+            .app_data(web::Data::new(create_pool().unwrap()))
+            .route("/clientes/{client_id}/extrato", web::get().to(customer_statement))
+            .route("/clientes/{client_id}/transacoes", web::post().to(customer_transaction))
         })
-        .bind("0.0.0.0:8080")?
+        .bind(format!("0.0.0.0:{port}"))?
         .run()
         .await
 }
